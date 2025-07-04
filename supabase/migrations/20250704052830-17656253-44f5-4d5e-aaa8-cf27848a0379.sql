@@ -1,4 +1,5 @@
 
+
 -- Create polls table
 CREATE TABLE public.polls (
   id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -111,5 +112,6 @@ UPDATE public.profiles
 SET role = 'admin' 
 WHERE id IN (
   SELECT id FROM auth.users 
-  WHERE email = 'your-email@example.com'
+  WHERE email = 'amanharrdy2345@gmail.com'
 );
+
