@@ -5,13 +5,66 @@ import { Vote, LogOut, User, Moon, Sun, Menu, X } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { supabase } from '@/integrations/supabase/client';
 
 const NavigationHeader = () => {
   const { user, signOut } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [pollsCount, setPollsCount] = useState(0);
+
+  useEffect(() => {
+    const checkAdminStatus = async () => {
+      if (!user) return;
+      
+      try {
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', user.id)
+          .single();
+
+        if (!error && data?.role === 'admin') {
+          setIsAdmin(true);
+        }
+      } catch (error) {
+        console.error('Error checking admin status:', error);
+      }
+    };
+
+    const fetchPollsCount = async () => {
+      try {
+        const { count, error } = await supabase
+          .from('polls')
+          .select('*', { count: 'exact', head: true })
+          .eq('status', 'active');
+
+        if (!error) {
+          setPollsCount(count || 0);
+        }
+      } catch (error) {
+        console.error('Error fetching polls count:', error);
+      }
+    };
+
+    checkAdminStatus();
+    fetchPollsCount();
+
+    // Set up real-time subscription for polls count
+    const pollsSubscription = supabase
+      .channel('polls-count')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'polls' }, () => {
+        fetchPollsCount();
+      })
+      .subscribe();
+
+    return () => {
+      pollsSubscription.unsubscribe();
+    };
+  }, [user]);
 
   const handleSignOut = async () => {
     await signOut();
@@ -19,10 +72,10 @@ const NavigationHeader = () => {
 
   const navigationItems = [
     { name: 'Home', path: '/', badge: null },
-    { name: 'Polls', path: '/polls', badge: '12 Active' },
-    { name: 'Elections', path: '/elections', badge: '3 Upcoming' },
+    { name: 'Polls', path: '/polls', badge: `${pollsCount} Active` },
+    { name: 'Elections', path: '/elections', badge: 'Coming Soon' },
     { name: 'Results', path: '/results', badge: 'Live' },
-    { name: 'Admin', path: '/admin', badge: 'Admin Only' },
+    ...(isAdmin ? [{ name: 'Admin', path: '/admin', badge: 'Admin' }] : []),
   ];
 
   const isActive = (path: string) => location.pathname === path;
@@ -79,6 +132,9 @@ const NavigationHeader = () => {
             <div className="hidden md:flex items-center space-x-2 text-muted-foreground">
               <User className="h-4 w-4" />
               <span className="text-sm">{user?.email}</span>
+              {isAdmin && (
+                <Badge variant="outline" className="text-xs">Admin</Badge>
+              )}
             </div>
 
             {/* Sign Out (Desktop) */}
@@ -138,6 +194,9 @@ const NavigationHeader = () => {
               <div className="flex items-center space-x-2 text-muted-foreground mb-3">
                 <User className="h-4 w-4" />
                 <span className="text-sm">{user?.email}</span>
+                {isAdmin && (
+                  <Badge variant="outline" className="text-xs">Admin</Badge>
+                )}
               </div>
               <Button
                 variant="outline"

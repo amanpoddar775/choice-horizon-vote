@@ -1,5 +1,5 @@
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -9,6 +9,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
+import { toast } from '@/components/ui/use-toast';
 import { 
   Plus, 
   Edit, 
@@ -19,99 +20,249 @@ import {
   Pause,
   Calendar
 } from 'lucide-react';
+import { supabase } from '@/integrations/supabase/client';
+import { useAuth } from '@/contexts/AuthContext';
 
 interface Poll {
-  id: number;
+  id: string;
   title: string;
-  description: string;
+  description: string | null;
   category: string;
-  status: 'Active' | 'Paused' | 'Ended';
-  votes: number;
-  endDate: string;
-  options: string[];
-  createdAt: string;
+  status: string;
+  end_date: string;
+  created_at: string;
+  updated_at: string;
+  created_by: string;
+  options?: PollOption[];
+  totalVotes?: number;
+}
+
+interface PollOption {
+  id: string;
+  poll_id: string;
+  option_text: string;
+  votes: number | null;
+  created_at: string;
 }
 
 const PollManager = () => {
-  const [polls, setPolls] = useState<Poll[]>([
-    {
-      id: 1,
-      title: "Best Programming Language 2024",
-      description: "Vote for your favorite programming language",
-      category: "Technology",
-      status: "Active",
-      votes: 1247,
-      endDate: "2024-07-10",
-      options: ["JavaScript", "Python", "TypeScript", "Go"],
-      createdAt: "2024-07-01"
-    },
-    {
-      id: 2,
-      title: "Favorite Coffee Shop Chain",
-      description: "Which coffee shop do you prefer?",
-      category: "Food & Drink",
-      status: "Active",
-      votes: 892,
-      endDate: "2024-07-15",
-      options: ["Starbucks", "Dunkin'", "Local Coffee Shop", "Tim Hortons"],
-      createdAt: "2024-07-02"
-    }
-  ]);
-
+  const { user } = useAuth();
+  const [polls, setPolls] = useState<Poll[]>([]);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [editingPoll, setEditingPoll] = useState<Poll | null>(null);
+  const [loading, setLoading] = useState(true);
   const [newPoll, setNewPoll] = useState({
     title: '',
     description: '',
     category: '',
-    endDate: '',
+    end_date: '',
     options: ['', '']
   });
 
-  const handleCreatePoll = () => {
-    if (!newPoll.title || !newPoll.category || !newPoll.endDate) return;
-    
-    const poll: Poll = {
-      id: Math.max(...polls.map(p => p.id)) + 1,
-      title: newPoll.title,
-      description: newPoll.description,
-      category: newPoll.category,
-      status: 'Active',
-      votes: 0,
-      endDate: newPoll.endDate,
-      options: newPoll.options.filter(opt => opt.trim() !== ''),
-      createdAt: new Date().toISOString().split('T')[0]
-    };
+  const fetchPolls = async () => {
+    try {
+      setLoading(true);
+      const { data: pollsData, error: pollsError } = await supabase
+        .from('polls')
+        .select('*')
+        .order('created_at', { ascending: false });
 
-    setPolls([...polls, poll]);
-    setNewPoll({ title: '', description: '', category: '', endDate: '', options: ['', ''] });
-    setShowCreateDialog(false);
+      if (pollsError) throw pollsError;
+
+      // Fetch options for each poll
+      const pollsWithOptions = await Promise.all(
+        (pollsData || []).map(async (poll) => {
+          const { data: optionsData, error: optionsError } = await supabase
+            .from('poll_options')
+            .select('*')
+            .eq('poll_id', poll.id);
+
+          if (optionsError) throw optionsError;
+
+          const totalVotes = optionsData?.reduce((sum, option) => sum + (option.votes || 0), 0) || 0;
+
+          return {
+            ...poll,
+            options: optionsData || [],
+            totalVotes
+          };
+        })
+      );
+
+      setPolls(pollsWithOptions);
+    } catch (error) {
+      console.error('Error fetching polls:', error);
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Failed to fetch polls"
+      });
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleUpdatePoll = () => {
+  useEffect(() => {
+    fetchPolls();
+
+    // Set up real-time subscription
+    const pollsSubscription = supabase
+      .channel('polls-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'polls' }, () => {
+        fetchPolls();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'poll_options' }, () => {
+        fetchPolls();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'poll_votes' }, () => {
+        fetchPolls();
+      })
+      .subscribe();
+
+    return () => {
+      pollsSubscription.unsubscribe();
+    };
+  }, []);
+
+  const handleCreatePoll = async () => {
+    if (!newPoll.title || !newPoll.category || !newPoll.end_date || !user) return;
+    
+    try {
+      const validOptions = newPoll.options.filter(opt => opt.trim() !== '');
+      if (validOptions.length < 2) {
+        toast({
+          variant: "destructive",
+          title: "Error",
+          description: "Please provide at least 2 options"
+        });
+        return;
+      }
+
+      // Create poll
+      const { data: pollData, error: pollError } = await supabase
+        .from('polls')
+        .insert({
+          title: newPoll.title,
+          description: newPoll.description || null,
+          category: newPoll.category,
+          end_date: newPoll.end_date,
+          created_by: user.id
+        })
+        .select()
+        .single();
+
+      if (pollError) throw pollError;
+
+      // Create poll options
+      const optionsToInsert = validOptions.map(option => ({
+        poll_id: pollData.id,
+        option_text: option
+      }));
+
+      const { error: optionsError } = await supabase
+        .from('poll_options')
+        .insert(optionsToInsert);
+
+      if (optionsError) throw optionsError;
+
+      setNewPoll({ title: '', description: '', category: '', end_date: '', options: ['', ''] });
+      setShowCreateDialog(false);
+      toast({
+        title: "Success",
+        description: "Poll created successfully!"
+      });
+    } catch (error) {
+      console.error('Error creating poll:', error);
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Failed to create poll"
+      });
+    }
+  };
+
+  const handleUpdatePoll = async () => {
     if (!editingPoll) return;
     
-    setPolls(polls.map(poll => 
-      poll.id === editingPoll.id ? editingPoll : poll
-    ));
-    setEditingPoll(null);
+    try {
+      const { error: pollError } = await supabase
+        .from('polls')
+        .update({
+          title: editingPoll.title,
+          description: editingPoll.description,
+          category: editingPoll.category,
+          end_date: editingPoll.end_date,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', editingPoll.id);
+
+      if (pollError) throw pollError;
+
+      setEditingPoll(null);
+      toast({
+        title: "Success",
+        description: "Poll updated successfully!"
+      });
+    } catch (error) {
+      console.error('Error updating poll:', error);
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Failed to update poll"
+      });
+    }
   };
 
-  const handleDeletePoll = (id: number) => {
-    setPolls(polls.filter(poll => poll.id !== id));
+  const handleDeletePoll = async (id: string) => {
+    try {
+      const { error } = await supabase
+        .from('polls')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+
+      toast({
+        title: "Success",
+        description: "Poll deleted successfully!"
+      });
+    } catch (error) {
+      console.error('Error deleting poll:', error);
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Failed to delete poll"
+      });
+    }
   };
 
-  const handleToggleStatus = (id: number) => {
-    setPolls(polls.map(poll => 
-      poll.id === id 
-        ? { ...poll, status: poll.status === 'Active' ? 'Paused' : 'Active' as 'Active' | 'Paused' }
-        : poll
-    ));
+  const handleToggleStatus = async (id: string, currentStatus: string) => {
+    try {
+      const newStatus = currentStatus === 'active' ? 'paused' : 'active';
+      const { error } = await supabase
+        .from('polls')
+        .update({ status: newStatus, updated_at: new Date().toISOString() })
+        .eq('id', id);
+
+      if (error) throw error;
+
+      toast({
+        title: "Success",
+        description: `Poll ${newStatus === 'active' ? 'activated' : 'paused'} successfully!`
+      });
+    } catch (error) {
+      console.error('Error toggling poll status:', error);
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Failed to update poll status"
+      });
+    }
   };
 
   const addOption = (isEdit = false) => {
     if (isEdit && editingPoll) {
-      setEditingPoll({ ...editingPoll, options: [...editingPoll.options, ''] });
+      setEditingPoll({ ...editingPoll, options: [...(editingPoll.options || []), { id: '', poll_id: editingPoll.id, option_text: '', votes: 0, created_at: '' }] });
     } else {
       setNewPoll({ ...newPoll, options: [...newPoll.options, ''] });
     }
@@ -119,8 +270,8 @@ const PollManager = () => {
 
   const updateOption = (index: number, value: string, isEdit = false) => {
     if (isEdit && editingPoll) {
-      const newOptions = [...editingPoll.options];
-      newOptions[index] = value;
+      const newOptions = [...(editingPoll.options || [])];
+      newOptions[index] = { ...newOptions[index], option_text: value };
       setEditingPoll({ ...editingPoll, options: newOptions });
     } else {
       const newOptions = [...newPoll.options];
@@ -131,11 +282,16 @@ const PollManager = () => {
 
   const removeOption = (index: number, isEdit = false) => {
     if (isEdit && editingPoll) {
-      setEditingPoll({ ...editingPoll, options: editingPoll.options.filter((_, i) => i !== index) });
+      const newOptions = (editingPoll.options || []).filter((_, i) => i !== index);
+      setEditingPoll({ ...editingPoll, options: newOptions });
     } else {
       setNewPoll({ ...newPoll, options: newPoll.options.filter((_, i) => i !== index) });
     }
   };
+
+  if (loading) {
+    return <div className="flex justify-center items-center h-64">Loading polls...</div>;
+  }
 
   return (
     <div className="space-y-6">
@@ -181,11 +337,11 @@ const PollManager = () => {
                     <SelectValue placeholder="Select category" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="technology">Technology</SelectItem>
-                    <SelectItem value="entertainment">Entertainment</SelectItem>
-                    <SelectItem value="food">Food & Drink</SelectItem>
-                    <SelectItem value="sports">Sports</SelectItem>
-                    <SelectItem value="politics">Politics</SelectItem>
+                    <SelectItem value="Technology">Technology</SelectItem>
+                    <SelectItem value="Entertainment">Entertainment</SelectItem>
+                    <SelectItem value="Food & Drink">Food & Drink</SelectItem>
+                    <SelectItem value="Sports">Sports</SelectItem>
+                    <SelectItem value="Politics">Politics</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -194,8 +350,8 @@ const PollManager = () => {
                 <Input 
                   id="poll-end-date" 
                   type="date"
-                  value={newPoll.endDate}
-                  onChange={(e) => setNewPoll({ ...newPoll, endDate: e.target.value })}
+                  value={newPoll.end_date}
+                  onChange={(e) => setNewPoll({ ...newPoll, end_date: e.target.value })}
                 />
               </div>
               <div>
@@ -247,11 +403,11 @@ const PollManager = () => {
                   <CardTitle className="text-lg">{poll.title}</CardTitle>
                   <CardDescription className="flex items-center space-x-4 mt-2">
                     <Badge variant="secondary">{poll.category}</Badge>
-                    <Badge variant={poll.status === 'Active' ? 'default' : 'secondary'}>
+                    <Badge variant={poll.status === 'active' ? 'default' : 'secondary'}>
                       {poll.status}
                     </Badge>
                     <span className="text-sm text-muted-foreground">
-                      Ends: {new Date(poll.endDate).toLocaleDateString()}
+                      Ends: {new Date(poll.end_date).toLocaleDateString()}
                     </span>
                   </CardDescription>
                 </div>
@@ -259,9 +415,9 @@ const PollManager = () => {
                   <Button 
                     variant="outline" 
                     size="sm"
-                    onClick={() => handleToggleStatus(poll.id)}
+                    onClick={() => handleToggleStatus(poll.id, poll.status)}
                   >
-                    {poll.status === 'Active' ? (
+                    {poll.status === 'active' ? (
                       <Pause className="h-4 w-4" />
                     ) : (
                       <Play className="h-4 w-4" />
@@ -306,15 +462,15 @@ const PollManager = () => {
               <div className="grid md:grid-cols-3 gap-4 text-sm">
                 <div className="flex items-center space-x-2">
                   <Users className="h-4 w-4 text-muted-foreground" />
-                  <span>{poll.votes.toLocaleString()} votes</span>
+                  <span>{poll.totalVotes?.toLocaleString() || 0} votes</span>
                 </div>
                 <div className="flex items-center space-x-2">
                   <BarChart3 className="h-4 w-4 text-muted-foreground" />
-                  <span>{poll.options.length} options</span>
+                  <span>{poll.options?.length || 0} options</span>
                 </div>
                 <div className="flex items-center space-x-2">
                   <Calendar className="h-4 w-4 text-muted-foreground" />
-                  <span>Created {new Date(poll.createdAt).toLocaleDateString()}</span>
+                  <span>Created {new Date(poll.created_at).toLocaleDateString()}</span>
                 </div>
               </div>
             </CardContent>
@@ -328,7 +484,7 @@ const PollManager = () => {
           <DialogHeader>
             <DialogTitle>Edit Poll</DialogTitle>
             <DialogDescription>
-              Update poll details and options
+              Update poll details
             </DialogDescription>
           </DialogHeader>
           {editingPoll && (
@@ -345,7 +501,7 @@ const PollManager = () => {
                 <Label htmlFor="edit-poll-description">Description</Label>
                 <Textarea 
                   id="edit-poll-description" 
-                  value={editingPoll.description}
+                  value={editingPoll.description || ''}
                   onChange={(e) => setEditingPoll({ ...editingPoll, description: e.target.value })}
                 />
               </div>
@@ -359,11 +515,11 @@ const PollManager = () => {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="technology">Technology</SelectItem>
-                    <SelectItem value="entertainment">Entertainment</SelectItem>
-                    <SelectItem value="food">Food & Drink</SelectItem>
-                    <SelectItem value="sports">Sports</SelectItem>
-                    <SelectItem value="politics">Politics</SelectItem>
+                    <SelectItem value="Technology">Technology</SelectItem>
+                    <SelectItem value="Entertainment">Entertainment</SelectItem>
+                    <SelectItem value="Food & Drink">Food & Drink</SelectItem>
+                    <SelectItem value="Sports">Sports</SelectItem>
+                    <SelectItem value="Politics">Politics</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -372,36 +528,9 @@ const PollManager = () => {
                 <Input 
                   id="edit-poll-end-date" 
                   type="date"
-                  value={editingPoll.endDate}
-                  onChange={(e) => setEditingPoll({ ...editingPoll, endDate: e.target.value })}
+                  value={editingPoll.end_date}
+                  onChange={(e) => setEditingPoll({ ...editingPoll, end_date: e.target.value })}
                 />
-              </div>
-              <div>
-                <Label>Poll Options</Label>
-                <div className="space-y-2">
-                  {editingPoll.options.map((option, index) => (
-                    <div key={index} className="flex items-center space-x-2">
-                      <Input
-                        placeholder={`Option ${index + 1}`}
-                        value={option}
-                        onChange={(e) => updateOption(index, e.target.value, true)}
-                      />
-                      {editingPoll.options.length > 2 && (
-                        <Button 
-                          variant="outline" 
-                          size="sm"
-                          onClick={() => removeOption(index, true)}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      )}
-                    </div>
-                  ))}
-                  <Button variant="outline" onClick={() => addOption(true)} className="w-full">
-                    <Plus className="mr-2 h-4 w-4" />
-                    Add Option
-                  </Button>
-                </div>
               </div>
               <div className="flex justify-end space-x-2">
                 <Button variant="outline" onClick={() => setEditingPoll(null)}>
