@@ -26,6 +26,7 @@ const Auth = () => {
   const [signupPassword, setSignupPassword] = useState('');
   const [signupFullName, setSignupFullName] = useState('');
   const [signupUsername, setSignupUsername] = useState('');
+  const [isAdminLogin, setIsAdminLogin] = useState(false);
 
   // Check if user is already logged in
   useEffect(() => {
@@ -44,7 +45,7 @@ const Auth = () => {
     setError('');
 
     try {
-      const { error } = await supabase.auth.signInWithPassword({
+      const { data, error } = await supabase.auth.signInWithPassword({
         email: loginEmail,
         password: loginPassword,
       });
@@ -58,8 +59,23 @@ const Auth = () => {
         return;
       }
 
+      // If admin login is requested, verify user has admin role
+      if (isAdminLogin && data.user) {
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', data.user.id)
+          .single();
+
+        if (profileError || !profile || profile.role !== 'admin') {
+          setError('Access denied. Admin privileges required.');
+          await supabase.auth.signOut();
+          return;
+        }
+      }
+
       toast({
-        title: "Welcome back!",
+        title: isAdminLogin ? "Welcome back, Admin!" : "Welcome back!",
         description: "You've successfully logged in.",
       });
       navigate('/');
@@ -172,6 +188,18 @@ const Auth = () => {
                       onChange={(e) => setLoginPassword(e.target.value)}
                       required
                     />
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <input
+                      id="admin-login"
+                      type="checkbox"
+                      checked={isAdminLogin}
+                      onChange={(e) => setIsAdminLogin(e.target.checked)}
+                      className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
+                    />
+                    <Label htmlFor="admin-login" className="text-sm font-medium text-gray-700">
+                      Login as Admin
+                    </Label>
                   </div>
                   <Button
                     type="submit"
